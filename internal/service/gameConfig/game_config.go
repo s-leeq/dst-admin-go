@@ -6,6 +6,8 @@ import (
 	"dst-admin-go/internal/pkg/utils/fileUtils"
 	"dst-admin-go/internal/service/archive"
 	"dst-admin-go/internal/service/levelConfig"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -217,7 +219,17 @@ func (p *GameConfig) SaveClusterIni(clusterName string, clusterIni *ClusterIni) 
 }
 
 func (p *GameConfig) GetClusterToken(clusterName string) (string, error) {
-	return fileUtils.ReadFile(p.archive.ClusterTokenPath(clusterName))
+	token, err := fileUtils.ReadFile(p.archive.ClusterTokenPath(clusterName))
+	if err != nil {
+		// token 未配置是合法状态（新集群、或从没有 token 的备份恢复过来）。
+		// 早期实现把「文件不存在」当成致命错误，导致 GET /api/game/8level/clusterIni
+		// 直接 500，前端房间设置页拿不到表单，用户填了 token 也提交不上去。
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return token, nil
 }
 
 func (p *GameConfig) SaveClusterToken(clusterName string, token string) error {
