@@ -1,0 +1,8 @@
+steamcmd=/app/steamcmd
+force_install_dir=/app/dst-dedicated-server
+cluster=Cluster_1
+backup=/app/data/backup
+mod_download_path=/app/data/mod
+bin=2664
+beta=0
+persistent_storage_root=/app/data

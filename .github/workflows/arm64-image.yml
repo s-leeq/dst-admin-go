@@ -1,0 +1,145 @@
+name: arm64 image
+
+# 跟着上游走：默认构建上游 main（最新版），也支持指定 tag；每天定时检查一次。
+# 只出 linux/arm64，和上游 amd64 镜像的分工是「同一套代码，两个架构」。
+on:
+  push:
+    tags: ["*"]
+  schedule:
+    - cron: "30 19 * * *" # UTC 19:30 = 北京时间 03:30
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "上游 ref（分支或 tag，留空 = main）"
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/dst-admin-go
+  UPSTREAM: carrot-hu23/dst-admin-go
+  FRONTEND: carrot-hu23/dst-manage-web2
+
+jobs:
+  build:
+    name: build linux/arm64
+    runs-on: ubuntu-24.04-arm # GitHub 原生 arm64 runner，不需要 QEMU
+    steps:
+      - name: 解析目标 ref
+        id: ref
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            ref="${{ github.ref_name }}"
+          elif [ -n "${{ inputs.upstream_ref }}" ]; then
+            ref="${{ inputs.upstream_ref }}"
+          else
+            ref=main
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "目标 ref: $ref"
+
+      - name: 取本仓库（arm64 构建脚本）
+        uses: actions/checkout@v4
+        with:
+          path: fw
+
+      - name: 取上游后端
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ steps.ref.outputs.ref }}
+          path: src
+
+      - name: 取上游前端
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND }}
+          ref: main
+          path: web
+
+      - name: 记录版本
+        id: ver
+        run: |
+          set -euo pipefail
+          sha=$(git -C src rev-parse --short HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.ref.outputs.ref }}" = "main" ]; then
+            echo "tag=main-${sha}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ steps.ref.outputs.ref }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 登录 ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: 判断该提交的镜像是否已存在
+        id: exists
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          if docker manifest inspect "${IMAGE}:sha-${{ steps.ver.outputs.sha }}-arm64" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "已存在 ${IMAGE}:sha-${{ steps.ver.outputs.sha }}-arm64，跳过构建"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 构建前端
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          # 上游 lockfile 的 resolved 指向 npmmirror，新版 npm 会拒绝拉 "remote" 包
+          npm --prefix web ci --no-audit --no-fund \
+              --registry=https://registry.npmjs.org/ \
+              --replace-registry-host=always
+          npm --prefix web run build
+          mkdir -p src/dist
+          cp -a web/dist/. src/dist/
+
+      - name: 覆盖 arm64 构建脚本
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          mkdir -p src/scripts/docker/arm64
+          cp -f fw/scripts/docker/arm64/Dockerfile \
+                fw/scripts/docker/arm64/docker-entrypoint.sh \
+                fw/scripts/docker/arm64/steamcmd-shim.sh \
+                fw/scripts/docker/arm64/docker_dst_config \
+                src/scripts/docker/arm64/
+
+      - name: 设置 buildx
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建并推送
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: fw/scripts/docker/arm64/Dockerfile
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            GOPROXY=https://proxy.golang.org,direct
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}-arm64
+            ${{ env.IMAGE }}:sha-${{ steps.ver.outputs.sha }}-arm64
+            ${{ env.IMAGE }}:latest-arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.version=${{ steps.ver.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.ver.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM }}
+
+      - name: 输出摘要
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          {
+            echo "### arm64 镜像已发布"
+            echo ""
+            echo "- 上游 ref: \`${{ steps.ref.outputs.ref }}\`"
+            echo "- 提交: \`${{ steps.ver.outputs.sha }}\`"
+            echo "- 镜像: \`${IMAGE}:${{ steps.ver.outputs.tag }}-arm64\` / \`:latest-arm64\`"
+          } >> "$GITHUB_STEP_SUMMARY"

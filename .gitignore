@@ -36,3 +36,8 @@ yarn-error.log*
 /script/py-dst-cli/data
 
 /test
+# arm64 docker 构建产物（dist 由 build.sh 从上游 release 解出）
+/scripts/docker/arm64/dist
+
+# arm64 构建缓存（前端 dist 等）
+/.cache
