@@ -4,7 +4,6 @@ import (
 	"dst-admin-go/internal/service/login"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -14,11 +13,13 @@ var (
 	whitelist = []string{"/api/login", "/api/logout", "/ws", "/api/dst-static", "/api/init", "/api/install/steamcmd"}
 )
 
+// apiFilter 判断该路径是否属于「公开接口」（无需登录 / 无需集群上下文）。
+//
+// 早期实现把「路径里不含 /api」的所有路由都当成公开，于是 /backup/restore
+// 这类没有 /api 前缀的路由同时绕过了 Authentication 和 ClusterMiddleware：
+// 既能匿名调用，又拿不到 cluster 名（后者会让存档路径退化成克雷根目录）。
+// 现在只认白名单精确匹配，其余路由一律走正常中间件链。
 func apiFilter(s []string, str string) bool {
-	//开放不是 /api 开头接口
-	if !strings.Contains(str, "/api") {
-		return true
-	}
 	for _, v := range s {
 		if v == str {
 			return true

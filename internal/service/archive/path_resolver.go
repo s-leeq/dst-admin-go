@@ -66,6 +66,11 @@ func (r *PathResolver) KleiBasePath(clusterName string) string {
 }
 
 func (r *PathResolver) ClusterPath(cluster string) string {
+	// 空 cluster 时 filepath.Join 会退化成 <Persistent_storage_root>/<conf_dir>，
+	// 也就是整个克雷存档根目录；调用方一旦对它执行删除，会清掉所有集群的存档。
+	if strings.TrimSpace(cluster) == "" {
+		log.Panic("ClusterPath: cluster 名为空，拒绝拼接存档路径")
+	}
 	return filepath.Join(
 		r.KleiBasePath(cluster),
 		cluster,

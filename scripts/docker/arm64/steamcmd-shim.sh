@@ -20,6 +20,19 @@
 set -u
 
 DEPOT=${DEPOT:-/opt/DepotDownloader/DepotDownloader}
+# 只给下载器用的代理：容器全局不设 HTTP_PROXY/HTTPS_PROXY 时（让游戏进程直连、注册区域
+# 按真实出口 IP 判定），仍可单独指定 DEPOT_PROXY 让 DepotDownloader 走代理下载。
+DEPOT_PROXY=${DEPOT_PROXY:-}
+
+run_depot() {
+  if [ -n "$DEPOT_PROXY" ] && [ -z "${HTTP_PROXY:-}${HTTPS_PROXY:-}" ]; then
+    env HTTP_PROXY="$DEPOT_PROXY" HTTPS_PROXY="$DEPOT_PROXY" \
+        NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}" \
+        "$DEPOT" "$@"
+  else
+    "$DEPOT" "$@"
+  fi
+}
 
 # 只拆分「+ 开头的打包参数」，其余 argv（尤其是路径）保持原样，不破坏边界
 tokens=()
@@ -65,7 +78,7 @@ if [ -n "$workshop_id" ]; then
   mkdir -p "$parent"
   rm -rf "$tmp"
   echo "steamcmd-shim: depot download workshop item $workshop_id (app $workshop_app) -> $out"
-  if ! "$DEPOT" -app "$workshop_app" -pubfile "$workshop_id" -dir "$tmp"; then
+  if ! run_depot -app "$workshop_app" -pubfile "$workshop_id" -dir "$tmp"; then
     rm -rf "$tmp"
     echo "steamcmd-shim: DepotDownloader failed for workshop item $workshop_id" >&2
     exit 1
@@ -90,4 +103,5 @@ args=(-app "$app_id" -os linux -osarch 64 -dir "$install_dir")
 [ -n "$validate" ] && args+=(-validate)
 
 echo "steamcmd-shim: depot download app $app_id -> $install_dir ${branch:+(branch $branch)}"
-exec "$DEPOT" "${args[@]}"
+run_depot "${args[@]}"
+exit $?

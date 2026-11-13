@@ -30,6 +30,10 @@ func (h *BackupHandler) RegisterRoute(router *gin.RouterGroup) {
 	router.PUT("/api/game/backup", h.RenameBackup)
 	router.GET("/api/game/backup/download", h.DownloadBackup)
 	router.POST("/api/game/backup/upload", h.UploadBackup)
+	// 规范路径：和其余接口一致，走 /api 前缀（认证 + 集群中间件）
+	router.GET("/api/game/backup/restore", h.RestoreBackup)
+	router.POST("/api/game/backup/restore", h.RestoreBackup)
+	// 兼容旧前端；apiFilter 修复后这条同样受 Authentication/ClusterMiddleware 保护
 	router.GET("/backup/restore", h.RestoreBackup)
 	router.POST("/api/game/backup/snapshot/setting", h.SaveBackupSnapshotsSetting)
 	router.GET("/api/game/backup/snapshot/setting", h.GetBackupSnapshotsSetting)
@@ -128,8 +132,19 @@ func (h *BackupHandler) RenameBackup(ctx *gin.Context) {
 // @Router /backup/restore [get]
 func (h *BackupHandler) RestoreBackup(ctx *gin.Context) {
 	backupName := ctx.Query("backupName")
+	if backupName == "" {
+		backupName = ctx.PostForm("backupName")
+	}
 
-	h.backupService.RestoreBackup(ctx, backupName)
+	if err := h.backupService.RestoreBackup(ctx, backupName); err != nil {
+		log.Println("恢复备份失败:", err)
+		ctx.JSON(http.StatusOK, response.Response{
+			Code: 500,
+			Msg:  err.Error(),
+			Data: nil,
+		})
+		return
+	}
 
 	ctx.JSON(http.StatusOK, response.Response{
 		Code: 200,
@@ -148,7 +163,15 @@ func (h *BackupHandler) RestoreBackup(ctx *gin.Context) {
 // @Router /api/game/backup/upload [post]
 func (h *BackupHandler) UploadBackup(ctx *gin.Context) {
 
-	h.backupService.UploadBackup(ctx)
+	if err := h.backupService.UploadBackup(ctx); err != nil {
+		log.Println("上传备份失败:", err)
+		ctx.JSON(http.StatusOK, response.Response{
+			Code: 500,
+			Msg:  err.Error(),
+			Data: nil,
+		})
+		return
+	}
 
 	ctx.JSON(http.StatusOK, response.Response{
 		Code: 200,

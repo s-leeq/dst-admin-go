@@ -4,6 +4,7 @@ import (
 	"dst-admin-go/internal/pkg/response"
 	"dst-admin-go/internal/service/dstConfig"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -32,6 +33,17 @@ func ClusterMiddleware(dstConfigService dstConfig.Config) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, response.Response{
 				Code: 500,
 				Msg:  "集群配置不存在: " + clusterName,
+			})
+			c.Abort()
+			return
+		}
+
+		// 集群名必须非空：它决定后续所有路径（ClusterPath 会用它拼存档目录），
+		// 空值会让 filepath.Join 退化成克雷根目录。
+		if strings.TrimSpace(config.Cluster) == "" {
+			c.JSON(http.StatusInternalServerError, response.Response{
+				Code: 500,
+				Msg:  "集群配置缺少 cluster 字段",
 			})
 			c.Abort()
 			return
