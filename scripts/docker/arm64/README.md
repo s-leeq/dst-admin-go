@@ -139,6 +139,38 @@ docker compose up -d
 > ⚠️ `docker compose pull` 只对 registry 里的镜像生效；本地 `build.sh` 出来的镜像请用
 > `docker compose build && docker compose up -d`，或先 push 到 registry 再 pull。
 
+## 排障：首次下载卡在 `Connection timeout`
+
+容器直连 Steam 内容服务器（IP:端口，非域名）可能超时，尤其国内网络。DepotDownloader 是
+.NET 程序，会读 `HTTP_PROXY`/`HTTPS_PROXY`，让宿主机代理代跑即可：
+
+```bash
+docker run -d --name dst-admin \
+  -e HTTP_PROXY=http://host.docker.internal:6152 \
+  -e HTTPS_PROXY=http://host.docker.internal:6152 \
+  -e NO_PROXY=localhost,127.0.0.1,::1 \
+  ... dst-admin-go:latest-arm64
+```
+
+实测：不走代理时日志反复 `Connection timeout downloading depot manifest`；走代理后
+40 秒下到 535 MB，约 6 分钟完成 4.4 GB。
+
+另外，镜像默认 entrypoint 是「先下完游戏本体，再起面板」，首次启动期间 8082 打不开。
+想边下边看界面，可以覆盖启动命令（记得自己补 `chmod 755 bin64/*`，默认 entrypoint 里有这一步）：
+
+```bash
+docker run -d --name dst-admin ... --entrypoint /bin/bash dst-admin-go:latest-arm64 -c '
+  nohup /opt/DepotDownloader/DepotDownloader -app 343050 -os linux -osarch 64 \
+    -dir /app/dst-dedicated-server > /app/data/dl.log 2>&1 &
+  mkdir -p /app/data && [ -f /app/data/dst_config ] || cp /app/docker_dst_config.default /app/data/dst_config
+  cd /app && exec ./dst-admin-go'
+```
+
+服务端首次启动会提示 `No auth token could be found`，需要在面板里填 Klei 的
+`cluster_token`（https://accounts.klei.com/account/game/servers 生成）。
+日志里的 `libSDL2-2.0.so.0 / libSDL3.so.0` 缺失告警对 headless 服务端无影响，
+`dst.metrics.klei.com` 上报超时同样无影响。
+
 ## 冒烟测试
 
 ```bash
