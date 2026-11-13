@@ -11,7 +11,7 @@ Apple Silicon（M1/M2/M3/M4）与 ARM 服务器用的镜像构建脚本，**跟�
 | 组件 | 障碍 | 这里的做法 |
 |---|---|---|
 | 饥荒服务端 app 343050 | 只有 x86 / x86_64 二进制 | 用 **box64** 翻译执行 `bin64/dontstarve_dedicated_server_nullrenderer_x64`（面板 `bin=2664` 分支） |
-| steamcmd | Valve 只发布 x86 32 位版本 | 用 **DepotDownloader**（arm64 原生）+ `steamcmd-shim.sh` 冒充 `steamcmd.sh` |
+| steamcmd | Valve 只发布 x86 32 位版本 | 用 **DepotDownloader**（arm64 原生，自带 .NET 运行时，镜像里不再装 dotnet）+ `steamcmd-shim.sh` 冒充 `steamcmd.sh` |
 | 面板本体 | 无 arm64 产物 | `GOARCH=arm64` 现编 |
 | 前端 dist | 仓库里没有（`.gitignore`），最近 release 停在 1.6.1 | 从 `carrot-hu23/dst-manage-web2` 现编，按 commit 缓存 |
 
@@ -34,9 +34,36 @@ bash scripts/docker/arm64/build.sh --tag 1.6.1
 bash scripts/docker/arm64/build.sh --local
 ```
 
-构建上下文是仓库根。前端产物按 `dst-manage-web2` 的 commit 缓存在 `.cache/web-<sha>`
-（已 gitignore），第二次构建不再重编前端。首次构建还要编译 box64（ARM 上约 5–15 分钟），
-之后这一层走缓存，增量构建分钟级。
+构建上下文是仓库根。前端产物按 `dst-manage-web2` 的 commit 缓存在
+`.cache/web-<ref>-<sha>`（已 gitignore），第二次构建不再重编前端。首次构建还要编译
+box64（ARM 上约 5–15 分钟），之后这一层走缓存，增量构建分钟级。
+
+### 版本与源码布局
+
+Dockerfile 同时支持两种布局：v2 之后（有 `cmd/`、`internal/`，用 `go build ./cmd/server`）
+和 v2 之前（`main.go` 在根，如 `1.6.1`，用 `go build .`）。
+
+`--tag` 模式的前端产物按以下顺序解析，**任何一步失败都不会静默换成前端 main**：
+
+1. 该 tag 的新命名 release 资产 `dst-admin-go-<tag>-linux-amd64.tar.gz`；
+2. 旧命名 `dst-admin-go.<tag>.tar.gz`（1.6.1 这类老版本用的是这个，包内同样带 `dist/`）；
+3. 只有显式给出 `FRONTEND_REF=<ref>` 才会改用该 ref 构建前端；
+4. 都没有就报错退出（避免"说是 1.6.1，实际装的是 main 的前端"）。
+
+```bash
+# 例：构建 1.6.1（旧布局 + 旧资产命名）
+bash scripts/docker/arm64/build.sh --tag 1.6.1
+
+# 例：某个 tag 的 release 里确实没前端产物，明确指定前端 ref
+FRONTEND_REF=main bash scripts/docker/arm64/build.sh --tag 1.6.1
+```
+
+注意两点：
+
+- `latest-arm64` 只跟随 `main`；用 `--tag` 构建历史版本不会把 `latest` 指回旧版。
+- v2 之前的老版本（如 1.6.1）没有 `persistent_storage_root`，存档按它自己的逻辑落在
+  `~/.klei/DoNotStarveTogether`（容器内 `/root/.klei`），**不是** `/app/data`；
+  用老版本时请挂载 `/root/.klei`，`/app/data` 那套布局只对 v2 之后成立。
 
 > 注意：上游最近一次正式 release 是 `1.6.1`（2026-02），之后 main 一直往前走到
 > 2026-08（v2 重构 + 容器化改造），**且前端 dist 不再随 release 发布**——所以默认跟
@@ -118,7 +145,14 @@ docker compose up -d
 bash scripts/docker/arm64/verify.sh dst-admin-go:latest-arm64
 ```
 
-检查架构、box64、x86_64 运行库、DepotDownloader、shim 语法、面板二进制与前端产物。
+检查项都要求「真的跑通」，任一项失败即非 0 退出（不用 `|| true` 或管道吞错误）：
+
+- 架构必须是 `linux/arm64`；
+- `box64 --version` 有输出，并用 amd64 busybox 实测能翻译动态链接的 x86_64 程序；
+- x86_64 的 `libc/libstdc++/libgcc/libcurl` 存在；
+- DepotDownloader 可执行，且 `/usr/share/dotnet` 不存在（证明它自带运行时）；
+- shim 行为：含空格路径不被拆散、成功后原子改名、失败不留半成品目录；
+- 真起一次面板容器并 `curl /` 断言 200。
 
 ## 已知限制
 
@@ -126,6 +160,8 @@ bash scripts/docker/arm64/verify.sh dst-admin-go:latest-arm64
   `--memory=4g`，玩家数 ≤ 10。
 - DepotDownloader 匿名下载只覆盖公开工坊物品；需要登录态的工坊内容拿不到。
 - 存档路径固定为 `/app/data/DoNotStarveTogether/Cluster_1`，迁移旧档直接挂到这个路径。
+- 模组下载先落到 `<mod_download_path>/steamapps/workshop/content/322330/.<id>.partial.<pid>`，
+  成功后原子改名成 `<id>`；面板把"目录存在"当"已下载"，所以失败时不会留下空目录骗过它。
 - 若在 fork 上推送 tag，会同时触发上游的 `release.yml`（它要求同账号下有
   `dst-manage-web2` fork），只想出 arm64 镜像时用本 workflow 的 `workflow_dispatch`
   或等定时任务即可。

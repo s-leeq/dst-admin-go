@@ -1,0 +1,4 @@
+# arm64 构建上下文里没必要传给 builder 的东西
+.git
+.cache
+docs

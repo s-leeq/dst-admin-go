@@ -4,18 +4,20 @@
 #
 # 用法：
 #   ./build.sh                 # 跟上游 main（最新版），前端 dist 从上游前端仓库构建
-#   ./build.sh --tag 1.6.1     # 指定上游 tag
+#   ./build.sh --tag 1.6.1     # 指定上游 tag（前端产物取自该 tag 的 release）
 #   ./build.sh --local         # 用当前工作区代码
 #
-# 说明：上游最近一次正式 release 停在 1.6.1（2026-02），但 main 已经迭代到
-# 2026-08，且前端 dist 不再随 release 发布；所以默认「跟 main」，并把
-# carrot-hu23/dst-manage-web2 的前端产物现编出来（按 commit 缓存，编一次就够）。
+# 版本语义：
+#   main   —— 上游 main 的 HEAD；前端取自 dst-manage-web2 的 main（上游发布流水线同款组合）
+#   tag    —— 只接受「该 tag 的 release 里带 dist」或显式 FRONTEND_REF；
+#             拿不到就直接失败，不会静默换成前端 main（否则构建内容与 tag 不符）
 #
 # 环境变量：
 #   IMAGE            镜像仓库名，默认 dst-admin-go
 #   BAKE_GAME_SERVER true 时把游戏本体（约 4.5GB）烘进镜像
 #   GOPROXY          Go 模块代理，默认 https://goproxy.cn,direct
-#   NPM_REGISTRY     npm 源，默认沿用本机 npm 配置
+#   NPM_REGISTRY     npm 源，默认 https://registry.npmjs.org/
+#   FRONTEND_REF     前端 ref（tag 模式下的显式替代版本）
 #   UPSTREAM_REPO    上游后端仓库，默认 carrot-hu23/dst-admin-go
 #   FRONTEND_REPO    上游前端仓库，默认 carrot-hu23/dst-manage-web2
 # =============================================================================
@@ -25,9 +27,11 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 upstream=${UPSTREAM_REPO:-carrot-hu23/dst-admin-go}
 frontend=${FRONTEND_REPO:-carrot-hu23/dst-manage-web2}
+frontend_ref=${FRONTEND_REF:-main}
 image=${IMAGE:-dst-admin-go}
 bake=${BAKE_GAME_SERVER:-false}
 goproxy=${GOPROXY:-https://goproxy.cn,direct}
+npm_registry=${NPM_REGISTRY:-https://registry.npmjs.org/}
 cache_root=${CACHE_DIR:-$repo/.cache}
 
 mode=main
@@ -38,7 +42,13 @@ case "${1:-}" in
   *)                      mode=tag; tag=$1 ;;
 esac
 
-cleanup() { [ -n "${ctx_tmp:-}" ] && rm -rf "$ctx_tmp"; }
+# 清理只做可选动作，且必须保持原退出码（trap 里返回非 0 会污染 $?）
+cleanup() {
+  if [ -n "${ctx_tmp:-}" ]; then
+    rm -rf "$ctx_tmp"
+  fi
+  return 0
+}
 trap cleanup EXIT
 
 # ---- 解析版本 ----
@@ -68,29 +78,34 @@ else
         "$ctx/scripts/docker/arm64/"
 fi
 
-# ---- 准备前端 dist ----
+# ---- 前端：从上游前端仓库现编（按 commit 缓存） ----
 build_frontend() {
-  local dest=$1
-  local sha cache
-  sha=$(git ls-remote "https://github.com/$frontend.git" refs/heads/main | cut -c1-12)
-  cache="$cache_root/web-$sha"
+  local dest=$1 ref_name=$2
+  local sha cache tmp
+  sha=$(git ls-remote "https://github.com/$frontend.git" "refs/heads/$ref_name" "refs/tags/$ref_name" \
+        | head -1 | cut -c1-12)
+  [ -n "$sha" ] || { echo "!! 无法解析前端 ref: $frontend@$ref_name" >&2; return 1; }
+  cache="$cache_root/web-$ref_name-$sha"
 
   if [ -f "$cache/index.html" ]; then
     echo "==> 复用前端构建缓存: $cache"
   else
-    echo "==> 构建前端 $frontend@main ($sha) ..."
-    local tmp
+    echo "==> 构建前端 $frontend@$ref_name ($sha) ..."
     tmp=$(mktemp -d)
-    git clone --depth 1 "https://github.com/$frontend.git" "$tmp/web" --quiet
-    # 上游 lockfile 里的 resolved 指向 npmmirror，新版 npm 会拒绝拉 "remote" 包，
-    # 所以强制把 registry host 替换成本机的源；esbuild 的 postinstall 已实测能过。
-    (
+    git clone --depth 1 --branch "$ref_name" "https://github.com/$frontend.git" "$tmp/web" --quiet
+    # 上游 lockfile 的 resolved 指向 npmmirror，新版 npm 会拒绝拉 "remote" 包
+    if ! (
       cd "$tmp/web" \
         && npm ci --no-audit --no-fund \
-             --registry="${NPM_REGISTRY:-https://registry.npmjs.org/}" \
+             --registry="$npm_registry" \
              --replace-registry-host=always \
         && npm run build
-    ) >"$tmp/web.log" 2>&1 || { echo "!! 前端构建失败，日志尾部：" >&2; tail -30 "$tmp/web.log" >&2; exit 1; }
+    ) >"$tmp/web.log" 2>&1; then
+      echo "!! 前端构建失败，日志尾部：" >&2
+      tail -30 "$tmp/web.log" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
     mkdir -p "$cache"
     cp -a "$tmp/web/dist/." "$cache/"
     rm -rf "$tmp"
@@ -100,37 +115,62 @@ build_frontend() {
   cp -a "$cache/." "$dest/"
 }
 
-if [ ! -f "$ctx/dist/index.html" ]; then
-  # tag 模式优先用同版本 release 里的前端产物（版本最严格对齐）
-  if [ "$mode" = "tag" ]; then
-    url="https://github.com/$upstream/releases/download/${tag}/dst-admin-go-${tag}-linux-amd64.tar.gz"
-    tmpkg=$(mktemp -d)
-    if curl -fsSL "$url" -o "$tmpkg/pkg.tgz"; then
-      tar -xzf "$tmpkg/pkg.tgz" -C "$tmpkg"
-      pkgdir=$(find "$tmpkg" -maxdepth 1 -type d -name "dst-admin-go-*" | head -1)
-      mkdir -p "$ctx/dist" && cp -a "$pkgdir/dist/." "$ctx/dist/"
-      echo "==> 使用 release 自带前端产物: $tag"
-    else
-      echo "!! $tag 没有 linux-amd64 release 产物，回退到前端仓库构建" >&2
-      build_frontend "$ctx/dist"
+# ---- 前端：取某个 tag 的 release 里自带产物（新命名 + 旧命名都认） ----
+fetch_release_dist() {
+  local tag_name=$1 dest=$2 tmp name url found
+  tmp=$(mktemp -d)
+  for name in "dst-admin-go-${tag_name}-linux-amd64.tar.gz" "dst-admin-go.${tag_name}.tar.gz"; do
+    url="https://github.com/$upstream/releases/download/${tag_name}/${name}"
+    echo "==> 尝试同版本前端产物: $name"
+    if curl -fsSL --retry 2 "$url" -o "$tmp/pkg.tgz" 2>/dev/null; then
+      tar -xzf "$tmp/pkg.tgz" -C "$tmp" 2>/dev/null || true
+      found=$(find "$tmp" -type d -name dist 2>/dev/null | head -1)
+      if [ -n "$found" ] && [ -f "$found/index.html" ]; then
+        mkdir -p "$dest"
+        cp -a "$found/." "$dest/"
+        rm -rf "$tmp"
+        return 0
+      fi
     fi
-    rm -rf "$tmpkg"
+  done
+  rm -rf "$tmp"
+  return 1
+}
+
+if [ -f "$ctx/dist/index.html" ]; then
+  echo "==> 复用上下文中已有的 dist/"
+elif [ "$mode" = "tag" ]; then
+  if fetch_release_dist "$tag" "$ctx/dist"; then
+    echo "==> 使用 $tag 的 release 自带前端产物"
+  elif [ -n "${FRONTEND_REF:-}" ]; then
+    echo "!! $tag 的 release 里没有 dist，按显式指定的 FRONTEND_REF=$frontend_ref 构建前端" >&2
+    build_frontend "$ctx/dist" "$frontend_ref"
   else
-    build_frontend "$ctx/dist"
+    echo "!! $tag 的 release 里没有可用的前端产物，构建中止。" >&2
+    echo "!! 不会再静默回退到前端 main（那会让镜像内容与 $tag 不符）。" >&2
+    echo "!! 确实要用某个前端版本，请显式指定：FRONTEND_REF=main bash $0 --tag $tag" >&2
+    exit 1
   fi
+else
+  build_frontend "$ctx/dist" "$frontend_ref"
 fi
 
 # ---- 构建 ----
+# latest 只跟随 main；用 --tag 构建历史版本时不能把 latest 指回旧版本
+tags=(-t "${image}:${tag}-arm64")
+if [ "$mode" = "main" ]; then
+  tags+=(-t "${image}:latest-arm64")
+fi
+
 echo "==> buildx 构建 linux/arm64 镜像: ${image}:${tag}-arm64"
 docker buildx build \
   --platform linux/arm64 \
   -f "$here/Dockerfile" \
   --build-arg "GOPROXY=$goproxy" \
   --build-arg "BAKE_GAME_SERVER=$bake" \
-  -t "${image}:${tag}-arm64" \
-  -t "${image}:latest-arm64" \
+  "${tags[@]}" \
   --load \
   "$ctx"
 
-echo "==> 完成: ${image}:${tag}-arm64 / ${image}:latest-arm64"
+echo "==> 完成: $(printf '%s ' "${tags[@]}" | sed 's/-t //g')"
 docker image inspect "${image}:${tag}-arm64" --format '{{.Os}}/{{.Architecture}} size={{.Size}}' 2>/dev/null || true

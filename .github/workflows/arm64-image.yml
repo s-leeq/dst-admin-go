@@ -72,16 +72,29 @@ jobs:
             echo "tag=${{ steps.ref.outputs.ref }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 计算构建指纹（后端 + 前端 + arm64 脚本）
+        id: fp
+        run: |
+          set -euo pipefail
+          {
+            git -C src rev-parse HEAD
+            git -C web rev-parse HEAD
+            find fw/scripts/docker/arm64 -type f | sort | xargs sha256sum
+          } | sha256sum | cut -c1-12 > /tmp/fp
+          echo "value=$(cat /tmp/fp)" >> "$GITHUB_OUTPUT"
+
       - name: 登录 ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: 判断该提交的镜像是否已存在
         id: exists
         run: |
-          tag="${{ steps.ver.outputs.tag }}"
-          if docker manifest inspect "${IMAGE}:sha-${{ steps.ver.outputs.sha }}-arm64" >/dev/null 2>&1; then
+          # 指纹涵盖后端 commit、前端 commit 与全部 arm64 构建脚本：
+          # 任一变化（含只改 Dockerfile / shim）都会重新发布
+          ref="build-${{ steps.fp.outputs.value }}-arm64"
+          if docker manifest inspect "${IMAGE}:${ref}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "已存在 ${IMAGE}:sha-${{ steps.ver.outputs.sha }}-arm64，跳过构建"
+            echo "已存在 ${IMAGE}:${ref}，跳过构建"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -125,6 +138,7 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}-arm64
             ${{ env.IMAGE }}:sha-${{ steps.ver.outputs.sha }}-arm64
+            ${{ env.IMAGE }}:build-${{ steps.fp.outputs.value }}-arm64
             ${{ env.IMAGE }}:latest-arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -141,5 +155,6 @@ jobs:
             echo ""
             echo "- 上游 ref: \`${{ steps.ref.outputs.ref }}\`"
             echo "- 提交: \`${{ steps.ver.outputs.sha }}\`"
+            echo "- 构建指纹: \`${{ steps.fp.outputs.value }}\`"
             echo "- 镜像: \`${IMAGE}:${{ steps.ver.outputs.tag }}-arm64\` / \`:latest-arm64\`"
           } >> "$GITHUB_STEP_SUMMARY"
