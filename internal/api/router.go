@@ -19,6 +19,7 @@ import (
 	"dst-admin-go/internal/service/player"
 	"dst-admin-go/internal/service/schedule"
 	"dst-admin-go/internal/service/update"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/sessions"
@@ -69,6 +70,14 @@ func RegisterStaticFile(app *gin.Engine) {
 		}
 	}()
 	app.Use(func(context *gin.Context) {
+		// 这条中间件原本给静态资源加一年缓存，但它挂在 app 上是全局的，
+		// /api/* 的响应也带上了 public, max-age=30672000，浏览器会直接复用旧数据：
+		// 模组数量、世界状态、玩家列表都出现过「接口已更新但页面还是旧值」。
+		if strings.HasPrefix(context.Request.URL.Path, "/api/") {
+			context.Writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+			context.Writer.Header().Set("Pragma", "no-cache")
+			return
+		}
 		context.Writer.Header().Set("Cache-Control", "public, max-age=30672000")
 	})
 	app.LoadHTMLGlob("dist/index.html") // 添加入口index.html
