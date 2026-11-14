@@ -152,6 +152,16 @@ func (b *BackupService) RestoreBackup(ctx *gin.Context, backupName string) error
 		return fmt.Errorf("拒绝恢复到集群根目录: %s", clusterPath)
 	}
 
+	// 存档备份（尤其是别人给的存档包）通常不含 cluster_token.txt / 白名单 / 管理员名单，
+	// 而恢复会整个替换集群目录。这里先记住这些集群级文件，恢复后缺失就回填，
+	// 否则每次恢复都会丢 token，服务端启动直接 "No auth token could be found"。
+	preserved := map[string]string{}
+	for _, name := range []string{"cluster_token.txt", "adminlist.txt", "whitelist.txt", "blocklist.txt"} {
+		if content, err := fileUtils.ReadFile(filepath.Join(clusterPath, name)); err == nil {
+			preserved[name] = content
+		}
+	}
+
 	// 删除前先把现有存档整体移到备份目录；移动失败则中止，避免「先删后解压失败」丢档
 	if fileUtils.Exists(clusterPath) {
 		safePath := filepath.Join(config.Backup,
@@ -168,6 +178,19 @@ func (b *BackupService) RestoreBackup(ctx *gin.Context, backupName string) error
 	log.Println("正在恢复存档", filePath, "->", clusterPath)
 	if err := zip.Unzip3(filePath, clusterPath); err != nil {
 		return fmt.Errorf("解压失败: %w", err)
+	}
+
+	// 备份里没带的集群级文件，用恢复前的值回填（备份里带了则以备份为准）
+	for name, content := range preserved {
+		target := filepath.Join(clusterPath, name)
+		if fileUtils.Exists(target) || strings.TrimSpace(content) == "" {
+			continue
+		}
+		if err := fileUtils.WriterTXT(target, content); err != nil {
+			log.Println("回填集群文件失败:", name, err)
+			continue
+		}
+		log.Println("已回填集群文件:", name)
 	}
 
 	// 装配 mod（失败不影响本次恢复）
