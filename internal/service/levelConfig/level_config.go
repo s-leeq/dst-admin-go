@@ -30,6 +30,8 @@ type LevelInfo struct {
 	Leveldataoverride string    `json:"leveldataoverride"`
 	Modoverrides      string    `json:"modoverrides"`
 	ServerIni         ServerIni `json:"server_ini"`
+	// Status 表示该世界进程当前是否在运行；由 LevelService.GetLevelList 填充。
+	Status bool `json:"status"`
 }
 
 type ServerIni struct {

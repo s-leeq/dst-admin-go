@@ -35,7 +35,19 @@ func NewLevelService(gameProcess game.Process, dstConfig dstConfig.Config, resol
 }
 
 // GetLevelList 获取关卡列表
+// GetLevelList 返回世界列表，并为每个世界补上运行状态。
+// 前端（世界设置/面板）都依赖 status 字段判断开关状态，缺了就是 null。
 func (l *LevelService) GetLevelList(clusterName string) []levelConfig.LevelInfo {
+	levels := l.getLevelList(clusterName)
+	for i := range levels {
+		if status, err := l.gameProcess.Status(clusterName, levels[i].Uuid); err == nil {
+			levels[i].Status = status
+		}
+	}
+	return levels
+}
+
+func (l *LevelService) getLevelList(clusterName string) []levelConfig.LevelInfo {
 	config, err := l.levelConfigUtils.GetLevelConfig(clusterName)
 	if err != nil {
 		return []levelConfig.LevelInfo{}

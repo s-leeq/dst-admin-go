@@ -48,9 +48,9 @@ func (p *PlayerService) GetPlayerList(clusterName string, levelName string, game
 	command := ""
 	if levelName == "#ALL_LEVEL" {
 		levelName = "Master"
-		command = "for i, v in ipairs(TheNet:GetClientTable()) do  print(string.format(\\\"player: {[%s] [%d] [%s] [%s] [%s] [%s]} \\\", " + "'" + id + "'" + ",i-1, string.format('%03d', v.playerage), v.userid, v.name, v.prefab)) end"
+		command = "for i, v in ipairs(TheNet:GetClientTable()) do  print(string.format(\"player: {[%s] [%d] [%s] [%s] [%s] [%s]} \", " + "'" + id + "'" + ",i-1, string.format('%03d', v.playerage), v.userid, v.name, v.prefab)) end"
 	} else {
-		command = "for i, v in ipairs(AllPlayers) do print(string.format(\\\"player: {[%d] [%d] [%d] [%s] [%s] [%s]} \\\", " + id + ",i,v.components.age:GetAgeInDays(), v.userid, v.name, v.prefab)) end"
+		command = "for i, v in ipairs(AllPlayers) do print(string.format(\"player: {[%d] [%d] [%d] [%s] [%s] [%s]} \", " + id + ",i,v.components.age:GetAgeInDays(), v.userid, v.name, v.prefab)) end"
 	}
 
 	err := gameProcess.Command(clusterName, levelName, command)
