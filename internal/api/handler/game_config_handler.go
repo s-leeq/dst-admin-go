@@ -32,6 +32,10 @@ func (p *GameConfigHandler) RegisterRoute(router *gin.RouterGroup) {
 
 	router.GET("/api/game/config", p.GetConfig)
 	router.POST("/api/game/config", p.SaveConfig)
+	// 前端（dst-manage-web2 main）已改用 8level 前缀，后端此前只有 /api/game/config，
+	// 导致「世界设置」页取配置直接 404。这里加别名，新旧前端都能用。
+	router.GET("/api/game/8level/config", p.GetConfig)
+	router.POST("/api/game/8level/config", p.SaveConfig)
 }
 
 // GetClusterIni 获取房间 cluster.ini 配置 swagger 注释

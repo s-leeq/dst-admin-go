@@ -46,6 +46,27 @@ func (d *DstMapHandler) RegisterRoute(router *gin.RouterGroup) {
 // @Success 200 {object} response.Response
 // @Failure 400 {object} response.Response
 // @Router /api/dst/map/gen [get]
+// generateMapFile 生成指定世界的地图文件，返回输出路径。
+// 抽出来是为了让「预览图片」在文件缺失时也能直接出图，而不是 404。
+func (d *DstMapHandler) generateMapFile(clusterName, levelName string) (string, error) {
+	clusterPath := d.archiveResolver.ClusterPath(clusterName)
+	outputImage := filepath.Join(clusterPath, "dst_map_"+levelName+".jpg")
+	sessionPath := filepath.Join(clusterPath, levelName, "save", "session")
+	filePath, err := findLatestMetaFile(sessionPath)
+	if err != nil {
+		return "", fmt.Errorf("找不到 %s 的世界存档: %w", levelName, err)
+	}
+	log.Println("生成地图", filePath, outputImage)
+	height, width, err := dstMap.ExtractDimensions(filePath)
+	if err != nil {
+		return "", fmt.Errorf("读取存档尺寸失败: %w", err)
+	}
+	if err := d.generator.GenerateMap(filePath, outputImage, height, width); err != nil {
+		return "", fmt.Errorf("生成地图失败: %w", err)
+	}
+	return outputImage, nil
+}
+
 func (d *DstMapHandler) GenDstMap(ctx *gin.Context) {
 
 	levelName := ctx.Query("levelName")
@@ -57,31 +78,19 @@ func (d *DstMapHandler) GenDstMap(ctx *gin.Context) {
 		return
 	}
 	clusterName := context.GetClusterName(ctx)
-	clusterPath := d.archiveResolver.ClusterPath(clusterName)
-	outputImage := filepath.Join(clusterPath, "dst_map_"+levelName+".jpg")
-	sessionPath := filepath.Join(clusterPath, levelName, "save", "session")
-	filePath, err := findLatestMetaFile(sessionPath)
+	outputImage, err := d.generateMapFile(clusterName, levelName)
 	if err != nil {
-		log.Panicln(err)
-	}
-	log.Println("生成地图", filePath, outputImage)
-	height, width, err := dstMap.ExtractDimensions(filePath)
-	if err != nil {
-		log.Panicln(err)
-	}
-	err = d.generator.GenerateMap(
-		filePath,
-		outputImage,
-		height,
-		width,
-	)
-	if err != nil {
-		log.Panicln(err)
+		ctx.JSON(http.StatusOK, response.Response{
+			Code: 500,
+			Msg:  err.Error(),
+			Data: nil,
+		})
+		return
 	}
 	ctx.JSON(http.StatusOK, response.Response{
 		Code: 200,
 		Msg:  "success",
-		Data: nil,
+		Data: outputImage,
 	})
 }
 
@@ -108,6 +117,20 @@ func (d *DstMapHandler) GetDstMapImage(ctx *gin.Context) {
 	clusterPath := d.archiveResolver.ClusterPath(clusterName)
 
 	outputImage := filepath.Join(clusterPath, "dst_map_"+levelName+".jpg")
+	// 首次预览时图片还没生成过：就地生成一张，再返回，避免前端拿到 404
+	if !fileUtils.Exists(outputImage) {
+		log.Println("地图图片不存在，自动生成:", outputImage)
+		generated, err := d.generateMapFile(clusterName, levelName)
+		if err != nil {
+			ctx.JSON(http.StatusOK, response.Response{
+				Code: 500,
+				Msg:  "生成地图失败: " + err.Error(),
+				Data: nil,
+			})
+			return
+		}
+		outputImage = generated
+	}
 	log.Println(outputImage)
 	// 使用 Gin 提供的文件传输方法返回图片
 	ctx.File(outputImage)
