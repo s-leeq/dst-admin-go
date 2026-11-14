@@ -155,6 +155,42 @@ else
   build_frontend "$ctx/dist" "$frontend_ref"
 fi
 
+# ---- 给前端资源打补丁 ----
+# 上游 dst_world_setting.json 的「活动(events)」分组只有 default/enabled，
+# 而游戏本身支持 specialevent="none"；不补的话世界设置里关不掉活动。
+patch_web_assets() {
+  local dist_dir=$1
+  [ -d "$dist_dir" ] || return 0
+  python3 - "$dist_dir" <<'PYEOF'
+import json, sys, pathlib
+p = pathlib.Path(sys.argv[1]) / 'misc' / 'dst_world_setting.json'
+if not p.exists():
+    sys.exit(0)
+try:
+    data = json.loads(p.read_text())
+except Exception as e:
+    print('跳过 patch：', e)
+    sys.exit(0)
+changed = False
+for lang, worlds in data.items():
+    if not isinstance(worlds, dict):
+        continue
+    for _world, groups in worlds.items():
+        ev = (groups or {}).get('WORLDSETTINGS_GROUP', {}).get('events')
+        if not isinstance(ev, dict):
+            continue
+        desc = ev.setdefault('desc', {})
+        if 'none' not in desc:
+            desc['none'] = '无' if str(lang).lower().startswith('zh') else 'None'
+            changed = True
+if changed:
+    p.write_text(json.dumps(data, ensure_ascii=False))
+    print('已补 events.desc.none ->', p)
+PYEOF
+}
+
+patch_web_assets "$ctx/dist"
+
 # ---- 构建 ----
 # latest 只跟随 main；用 --tag 构建历史版本时不能把 latest 指回旧版本
 tags=(-t "${image}:${tag}-arm64")
