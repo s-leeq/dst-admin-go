@@ -7,6 +7,7 @@ import (
 	"dst-admin-go/internal/service/dstConfig"
 	"dst-admin-go/internal/service/mod"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strconv"
 
@@ -29,6 +30,7 @@ func (h *ModHandler) RegisterRoute(router *gin.RouterGroup) {
 	modGroup := router.Group("/api/mod")
 	{
 		modGroup.GET("/search", h.SearchModList)
+		modGroup.POST("/sync", h.SyncClusterMods)
 		modGroup.GET("/:modId", h.GetModInfo)
 		modGroup.PUT("/:modId", h.UpdateMod)
 		modGroup.GET("", h.GetMyModList)
@@ -55,6 +57,22 @@ func (h *ModHandler) RegisterRoute(router *gin.RouterGroup) {
 // @Param lang query string false "语言" default(zh)
 // @Success 200 {object} response.Response{}
 // @Router /api/mod/search [get]
+// SyncClusterMods 把存档里的 workshop 模组同步进面板数据库
+func (h *ModHandler) SyncClusterMods(ctx *gin.Context) {
+	clusterName := context.GetClusterName(ctx)
+	lang := ctx.DefaultQuery("lang", "zh")
+	added, total, err := h.modService.SyncClusterMods(clusterName, lang)
+	if err != nil {
+		response.FailWithMessage("同步失败: "+err.Error(), ctx)
+		return
+	}
+	response.OkWithData(map[string]interface{}{
+		"added": added,
+		"total": total,
+		"msg":   fmt.Sprintf("同步完成：新增 %d / 共 %d", added, total),
+	}, ctx)
+}
+
 func (h *ModHandler) SearchModList(ctx *gin.Context) {
 	text := ctx.Query("text")
 	page, _ := strconv.Atoi(ctx.DefaultQuery("page", "1"))

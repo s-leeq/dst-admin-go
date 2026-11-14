@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"dst-admin-go/internal/model"
+	"dst-admin-go/internal/pkg/utils/dstUtils"
 	"dst-admin-go/internal/pkg/utils/fileUtils"
 	"dst-admin-go/internal/pkg/utils/shellUtils"
 	"dst-admin-go/internal/service/archive"
@@ -468,6 +469,46 @@ func (s *ModService) GetMyModList() ([]model.ModInfo, error) {
 		}
 	}
 	return modInfos, nil
+}
+
+// SyncClusterMods 把集群 modoverrides.lua 里的 workshop 模组同步进数据库。
+// 导入别人的存档后，存档里只有 modoverrides 配置，没有面板数据库里的模组元信息，
+// 导致「模组设置」页面列表为空、详情加载不出来。这里按 workshop id 补齐。
+func (s *ModService) SyncClusterMods(clusterName, lang string) (int, int, error) {
+	config, err := s.dstConfig.GetDstConfig(clusterName)
+	if err != nil {
+		return 0, 0, fmt.Errorf("读取集群配置失败: %w", err)
+	}
+	_ = config
+
+	clusterPath := s.pathResolver.ClusterPath(clusterName)
+	idSet := make(map[string]struct{})
+	for _, level := range []string{"Master", "Caves"} {
+		modoverridesPath := filepath.Join(clusterPath, level, "modoverrides.lua")
+		content, err := fileUtils.ReadFile(modoverridesPath)
+		if err != nil {
+			continue // 该世界没有 modoverrides 是正常情况
+		}
+		for _, id := range dstUtils.WorkshopIds(content) {
+			if id != "" {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+
+	total := len(idSet)
+	added := 0
+	for id := range idSet {
+		if _, err := s.GetModByModId(id); err == nil {
+			continue // 已存在
+		}
+		if err := s.addModInfoToDb(clusterName, lang, id); err != nil {
+			log.Println("同步模组失败:", id, err)
+			continue
+		}
+		added++
+	}
+	return added, total, nil
 }
 
 // GetModByModId 根据modId获取模组
