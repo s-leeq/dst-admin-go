@@ -4,6 +4,9 @@
 
 ulimit -Sn 10000 2>/dev/null || true
 
+# 容器重启（/run 保留）时清掉上一次留下的 Dead screen 会话
+screen -wipe >/dev/null 2>&1 || true
+
 data_dir='/app/data'
 dst_server='/app/dst-dedicated-server'
 depot='/opt/DepotDownloader/DepotDownloader'

@@ -137,7 +137,19 @@ func (p *LinuxProcess) stop(clusterName, levelName string) error {
 		}
 	}
 	log.Println("使用kill命令强制结束世界", "cluster: ", clusterName, "level: ", levelName)
-	return p.killLevel(clusterName, levelName)
+	err := p.killLevel(clusterName, levelName)
+	// 进程被杀后 screen 会留下 Dead 会话，每次停止都会堆积，导致 screen -ls 越来越脏、
+	// 排查时也容易把 Dead 当成还在运行。screen -wipe 只清理 Dead 会话，不影响运行中的。
+	p.wipeDeadSessions()
+	return err
+}
+
+// wipeDeadSessions 清理 screen 的 Dead 会话（进程已退出但会话残留）。
+func (p *LinuxProcess) wipeDeadSessions() {
+	out, err := exec.Command("screen", "-wipe").CombinedOutput()
+	if err != nil {
+		log.Println("screen -wipe 失败:", err, strings.TrimSpace(string(out)))
+	}
 }
 
 func (p *LinuxProcess) StartAll(clusterName string) error {
