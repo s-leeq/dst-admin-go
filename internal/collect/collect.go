@@ -122,92 +122,80 @@ func (c *Collect) parseRegenerateLog(text string) {
 }
 
 func (c *Collect) parseNewIncomingLog(lines []string) {
-
 	defer func() {
-		if err := recover(); err != nil {
-			log.Println("new incoming 日志解析异常:", err)
+		if r := recover(); r != nil {
+			log.Println("new incoming 日志解析异常:", r)
 		}
 	}()
-	connect := model.Connect{}
-	log.Println("len:", len(lines), lines)
-	for i, line := range lines {
-		if i == 1 {
-			// 解析 ip
-			str := strings.Split(line, " ")
-			if len(str) < 5 {
-				log.Println("ip 解析错误: ", line)
-				connect.Ip = ""
-			} else {
-				var ip string
-				if strings.Contains(line, "[LAN]") {
-					ip = str[5]
-				} else {
-					ip = str[4]
-				}
-				connect.Ip = ip
-				fmt.Println("ip", ip)
-			}
-		}
-		if i == 2 {
-			// 解析 ip
-		}
-		if i == 3 {
-			// 解析 KuId 和 用户名
-			str := strings.Split(line, " ")
-			if len(str) <= 4 {
-				log.Println("kuid 解析错误: ", line)
-			} else {
-				ku := str[3]
-				ku = ku[1 : len(ku)-1]
-				name := str[4]
-				connect.Name = name
-				connect.KuId = ku
-				fmt.Println("ku", ku, "name", name)
-			}
-		}
-		if i == 4 {
-			// 解析 steamId
-			str := strings.Split(line, " ")
-			if len(str) < 4 {
-				log.Println("steamid 解析错误: ", line)
-			} else {
-				steamId := str[4]
-				steamId = steamId[1 : len(steamId)-1]
-				fmt.Println("steamId", steamId)
-				connect.SteamId = steamId
-				connect.ClusterName = c.clusterName
-			}
-		}
-		if strings.Contains(line, "Resuming user:") {
-			// 解析 session file path
-			str := strings.Split(line, " ")
-			log.Println(len(str), lines)
-			//[00:14:37]: Resuming user: session/7477D5E4A0424844/KU_Mt-zrX8K_
-			if len(str) < 4 {
-				log.Println("session file path 解析错误: ", line)
-			} else {
-				name := str[3]
-				name = strings.Replace(name, "session/", "", -1)
-				connect.SessionFile = name
-			}
-		}
-		// [03:19:10]: Serializing user: session/D480EA2CEF7633C0/KU_Mt-zrX8K_/0000000005
-		if strings.Contains(line, "Serializing user:") {
-			// 解析 session file path
-			str := strings.Split(line, " ")
-			log.Println(len(str), lines)
-			//[00:14:37]: Resuming user: session/7477D5E4A0424844/KU_Mt-zrX8K_
-			if len(str) < 4 {
-				log.Println("session file path 解析错误: ", line)
-			} else {
-				name := str[3]
-				name = strings.Replace(name, "session/", "", -1)
-				connect.SessionFile = name
-			}
 
+	// DST 762172 的进服日志行序和旧版不同，按行号取字段会全部错位
+	// （ip 取到 "1.2.3.4|1"、kuid 取到 "ValidateGameSessionToken" 之类）。
+	// 这里改成逐行正则匹配，字段出现顺序变化也不影响。
+	reConnected := regexp.MustCompile(`Client connected from ([0-9a-fA-F\.:]+)\|`)
+	reAuth := regexp.MustCompile(`Client authenticated: \((KU_[^)]+)\)\s*(.+)$`)
+	reInit := regexp.MustCompile(`\[ClientObject\] Initialized .*userid=(KU_\S+)\s+netid=(\d+)`)
+	reSession := regexp.MustCompile(`Resuming user: session/\S+/(\S+)`)
+
+	connect := model.Connect{ClusterName: c.clusterName}
+	for _, line := range lines {
+		if m := reConnected.FindStringSubmatch(line); m != nil {
+			connect.Ip = m[1]
+		}
+		if m := reAuth.FindStringSubmatch(line); m != nil {
+			connect.KuId = m[1]
+			connect.Name = strings.TrimSpace(m[2])
+		}
+		if m := reInit.FindStringSubmatch(line); m != nil {
+			connect.KuId = m[1]
+			connect.SteamId = m[2]
+		}
+		if m := reSession.FindStringSubmatch(line); m != nil {
+			connect.SessionFile = m[1]
 		}
 	}
-	database.Db.Create(&connect)
+
+	if connect.KuId == "" && connect.Ip == "" {
+		log.Println("new incoming 日志未解析到有效字段，跳过:", lines)
+		return
+	}
+	if err := database.Db.Create(&connect).Error; err != nil {
+		log.Println("插入玩家连接日志失败:", err)
+	}
+	log.Println("玩家连接记录:", connect.Name, connect.KuId, connect.SteamId, connect.Ip)
+}
+
+// parseSpawnRole 解析「User ID KU_xxx assigned ownership to entity 128734 - willow」，
+// 新版服务端没有 "Spawn request: <role> from <name>"，角色信息只在这条日志里。
+func (c *Collect) parseSpawnRole(text string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("角色日志解析异常:", r)
+		}
+	}()
+
+	re := regexp.MustCompile(`User ID\s+(KU_\S+)\s+assigned ownership to entity\s+\d+ - (\w+)`)
+	m := re.FindStringSubmatch(text)
+	if m == nil {
+		return
+	}
+	kuId, role := m[1], m[2]
+	t := ""
+	if i := strings.Index(text, "]:"); i > 0 {
+		t = strings.TrimPrefix(text[:i], "[")
+	}
+
+	connect := new(model.Connect)
+	database.Db.Where("ku_id = ? and cluster_name = ?", kuId, c.clusterName).Last(connect)
+	name := connect.Name
+	if name == "" {
+		name = kuId
+	}
+
+	spawn := model.Spawn{Name: name, Role: role, Time: t, ClusterName: c.clusterName}
+	if err := database.Db.Create(&spawn).Error; err != nil {
+		log.Println("插入玩家 Spawn 日志失败:", err)
+	}
+	log.Println("玩家角色记录:", name, kuId, role)
 }
 
 func (c *Collect) tailServeLog(fileName string) {
@@ -237,18 +225,26 @@ func (c *Collect) tailServeLog(fileName string) {
 				time.Sleep(time.Second)
 			} else {
 				text := line.Text
-				if find := strings.Contains(text, "Spawn request"); find {
+				if find := strings.Contains(text, "assigned ownership to entity"); find {
+					c.parseSpawnRole(text)
+				} else if find := strings.Contains(text, "Spawn request"); find {
 					c.parseSpawnRequestLog(text)
 				} else if find := strings.Contains(text, "# Generating"); find {
 					c.parseRegenerateLog(text)
 				} else if find := strings.Contains(text, "New incoming connection"); find {
+					// 上一批还没攒够行数就又来了一个新连接：先把上一批落库，避免两组字段串在一起
+					if isNewConnect && len(incoming) > 1 {
+						c.parseNewIncomingLog(incoming)
+					}
 					isNewConnect = true
+					incoming = []string{}
+					which = 0
 				}
 				// 获取接下来的五条数据
 				if isNewConnect {
 					incoming = append(incoming, text)
 					which++
-					if which > 10 {
+					if which > 11 {
 						isNewConnect = false
 						which = 0
 						c.parseNewIncomingLog(incoming)
@@ -321,8 +317,8 @@ func (c *Collect) parseSay(text string) {
 	actionDesc := matches[5]
 
 	// 获取玩家角色和连接信息
-	spawn := c.getSpawnRole(name)
 	connect := c.getConnectInfo(name)
+	spawn := c.getSpawnRole(name, connect.KuId)
 
 	playerLog := model.PlayerLog{
 		Name:        name,
@@ -397,8 +393,8 @@ func (c *Collect) parseDeath(text string) {
 		fmt.Println("Announcement Log 未找到分隔符，将全部分配给 Name:", name)
 	}
 
-	spawn := c.getSpawnRole(name)
 	connect := c.getConnectInfo(name)
+	spawn := c.getSpawnRole(name, connect.KuId)
 	fmt.Println(connect)
 
 	playerLog := model.PlayerLog{
@@ -443,8 +439,8 @@ func (c *Collect) parseJoin(text string) {
 	// 玩家名字是捕获组 3，使用 strings.TrimSpace 确保名字前后没有多余空格
 	name := strings.TrimSpace(matches[3])
 
-	spawn := c.getSpawnRole(name)
 	connect := c.getConnectInfo(name)
+	spawn := c.getSpawnRole(name, connect.KuId)
 
 	playerLog := model.PlayerLog{
 		Name:        name,
@@ -498,9 +494,15 @@ func (c *Collect) tailServerChatLog(fileName string) {
 	}
 }
 
-func (c *Collect) getSpawnRole(name string) *model.Spawn {
+func (c *Collect) getSpawnRole(name string, kuId string) *model.Spawn {
 	spawn := new(model.Spawn)
 	database.Db.Where("name LIKE ? and cluster_name = ?", "%"+name+"%", c.clusterName).Last(spawn)
+	if spawn.Role != "" || kuId == "" {
+		return spawn
+	}
+	// 角色行（assigned ownership to entity ... - <role>）可能先于连接记录落库，
+	// 那时 spawn 表里的 name 只能是 kuid，所以这里按 kuid 再兜底查一次。
+	database.Db.Where("name = ? and cluster_name = ?", kuId, c.clusterName).Last(spawn)
 	return spawn
 }
 
